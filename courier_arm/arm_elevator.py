@@ -54,7 +54,7 @@ NUM_MODEL_PATH    = os.path.join(_REPO_ROOT, 'yolo', 'weights', 'best_num.pt')
 
 # ─── 관절 상수 ────────────────────────────────────────────────────────────────
 
-HOME_JOINTS        = [-3.141, -0.9948, 0.6981, 0.2967]
+HOME_JOINTS        = [-3.1400, -1.9190, 1.2701, -0.7762]
 NUMBER_HOME_JOINTS = [-3.141, -0.9948, 0.6981, 0.6780]
 MOVE_SPEED   = 0.5
 MIN_DURATION = 2.0
