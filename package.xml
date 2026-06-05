@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <package format="3">
-  <name>elevator_robot</name>
+  <name>courier_arm</name>
   <version>0.1.0</version>
   <description>Elevator button pressing and delivery arm nodes for capstone project</description>
   <maintainer email="dmlgud0777@gmail.com">sejong</maintainer>

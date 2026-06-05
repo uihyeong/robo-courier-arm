@@ -32,7 +32,7 @@ from std_msgs.msg import Bool, Int32, String
 import tf2_ros
 import tf2_geometry_msgs
 
-from elevator_robot.ik import solve_ik, make_trajectory, JOINT_NAMES
+from courier_arm.ik import solve_ik, make_trajectory, JOINT_NAMES
 
 try:
     from ultralytics import YOLO

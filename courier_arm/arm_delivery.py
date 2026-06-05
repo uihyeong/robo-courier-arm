@@ -27,7 +27,7 @@
 실행:
   ros2 launch open_manipulator_x_bringup hardware.launch.py
   ros2 launch realsense2_camera rs_launch.py
-  ros2 run elevator_robot arm_delivery
+  ros2 run courier_arm arm_delivery
   ros2 topic pub --once /start_pickup std_msgs/Bool "{data: true}"
 """
 
@@ -48,7 +48,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, JointState
 from std_msgs.msg import Bool, String
 
-from elevator_robot.ik import solve_ik, make_trajectory, JOINT_NAMES
+from courier_arm.ik import solve_ik, make_trajectory, JOINT_NAMES
 
 try:
     import cv2

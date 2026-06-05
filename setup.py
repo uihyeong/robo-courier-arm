@@ -2,7 +2,7 @@ from setuptools import setup
 import os
 from glob import glob
 
-package_name = 'elevator_robot'
+package_name = 'courier_arm'
 
 setup(
     name=package_name,
@@ -19,11 +19,11 @@ setup(
     zip_safe=True,
     entry_points={
         'console_scripts': [
-            'arm_elevator     = elevator_robot.arm_elevator:main',
-            'arm_delivery     = elevator_robot.arm_delivery:main',
-            'contact_detector = elevator_robot.contact_detector:main',
-            'detect_room_sign = elevator_robot.detect_room_sign:main',
-            'scout            = elevator_robot.scout:main',
+            'arm_elevator     = courier_arm.arm_elevator:main',
+            'arm_delivery     = courier_arm.arm_delivery:main',
+            'contact_detector = courier_arm.contact_detector:main',
+            'detect_room_sign = courier_arm.detect_room_sign:main',
+            'scout            = courier_arm.scout:main',
         ],
     },
 )
