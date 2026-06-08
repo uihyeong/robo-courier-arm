@@ -55,7 +55,7 @@ NUM_MODEL_PATH    = os.path.join(_REPO_ROOT, 'yolo', 'weights', 'best_num.pt')
 # ─── 관절 상수 ────────────────────────────────────────────────────────────────
 
 HOME_JOINTS        = [-3.1400, -1.9190, 1.2701,  0.7240]
-NUMBER_HOME_JOINTS = [-3.141, -0.9948, 0.6981, 0.7240]
+NUMBER_HOME_JOINTS = [-3.1400, -1.9190, 1.2701,  0.7240]
 MOVE_SPEED   = 0.5
 MIN_DURATION = 2.0
 
@@ -78,6 +78,7 @@ UPDOWN_PRESS  = 'UPDOWN_PRESS'
 WAIT          = 'WAIT'
 NUMBER_READY  = 'NUMBER_READY'
 NUMBER_PRESS  = 'NUMBER_PRESS'
+NUMBER_WAIT   = 'NUMBER_WAIT'
 DONE          = 'DONE'
 
 
@@ -110,6 +111,7 @@ class ArmElevatorNode(Node):
 
         self.latest_frame      = None
         self._last_updown_bbox = None
+        self._last_number_bbox = None
 
         self._elevator_ready_event = threading.Event()
 
@@ -233,6 +235,14 @@ class ArmElevatorNode(Node):
                 else:
                     color = (0, 255, 0)
                     ratio_label = f'green={ratio:.3f} (>{LIT_GREEN_RATIO})'
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(frame, ratio_label, (x1, y1 - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+            if state == NUMBER_WAIT and self._last_number_bbox is not None:
+                x1, y1, x2, y2 = self._last_number_bbox
+                ratio = self._get_lit_ratio(self._last_number_bbox)
+                color = (0, 255, 0)
+                ratio_label = f'green={ratio:.3f} (>{LIT_GREEN_RATIO})' if ratio is not None else 'green=N/A'
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                 cv2.putText(frame, ratio_label, (x1, y1 - 8),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
@@ -368,6 +378,7 @@ class ArmElevatorNode(Node):
         return best_num
 
     def _trigger_number_press(self, depth, x1, y1, x2, y2):
+        self._last_number_bbox = (x1, y1, x2, y2)
         cx_box = (x1 + x2) // 2
         cy_box = (y1 + y2) // 2
 
@@ -401,7 +412,7 @@ class ArmElevatorNode(Node):
             f'{self.target_floor}층 버튼 감지! 위치: ({X:.3f}, {Y:.3f}, {Z:.3f})')
         threading.Thread(
             target=self._press_button,
-            args=(X, 0.0, Z - 0.031, f'{self.target_floor}층'),
+            args=(X, Y, Z - 0.031, f'{self.target_floor}층'),
             daemon=True,
         ).start()
 
@@ -423,9 +434,10 @@ class ArmElevatorNode(Node):
             self.get_logger().warn('숫자 버튼 실패 → 재시도')
             self.state = NUMBER_READY
 
-    def _get_lit_ratio(self) -> float | None:
+    def _get_lit_ratio(self, bbox=None) -> float | None:
         frame = self.latest_frame
-        bbox  = self._last_updown_bbox
+        if bbox is None:
+            bbox = self._last_updown_bbox
         if frame is None or bbox is None:
             return None
         x1, y1, x2, y2 = bbox
@@ -469,9 +481,45 @@ class ArmElevatorNode(Node):
             if ratio <= LIT_GREEN_RATIO:
                 self.get_logger().info(f'✅ 버튼 소등! (green_ratio={ratio:.3f}) 엘리베이터 도착')
                 self.status_pub.publish(String(data='ELEVATOR_ARRIVED'))
+                self._last_updown_bbox = None
                 return
             time.sleep(0.5)
         self.get_logger().warn(f'소등 타임아웃 ({TIMEOUT:.0f}초) → 강제 진행')
+
+    def _return_home_then_wait_number(self):
+        ok = self._send_trajectory(HOME_JOINTS)
+        if ok:
+            self.get_logger().info('홈 복귀 완료. 숫자 버튼 점등 확인 중...')
+        time.sleep(0.5)
+
+        ratio = self._get_lit_ratio(self._last_number_bbox)
+        if ratio is not None:
+            self.get_logger().info(f'숫자 버튼 점등: green_ratio={ratio:.3f} (기준 {LIT_GREEN_RATIO})')
+        self.status_pub.publish(String(data='NUMBER_PRESSED'))
+        self.get_logger().info('✅ 숫자 버튼 점등 확인. 소등 대기 중...')
+
+        TIMEOUT = 60.0
+        deadline = time.time() + TIMEOUT
+        last_log = time.time()
+        while time.time() < deadline:
+            ratio = self._get_lit_ratio(self._last_number_bbox)
+            if ratio is None:
+                self.get_logger().warn('소등 확인 불가 → 진행')
+                break
+            if time.time() - last_log >= 5.0:
+                self.get_logger().info(f'소등 대기 중... green_ratio={ratio:.3f}')
+                last_log = time.time()
+            if ratio <= LIT_GREEN_RATIO:
+                self.get_logger().info(f'✅ 숫자 버튼 소등! (green_ratio={ratio:.3f})')
+                break
+            time.sleep(0.5)
+        else:
+            self.get_logger().warn(f'소등 타임아웃 ({TIMEOUT:.0f}초) → 강제 진행')
+
+        self._last_number_bbox = None
+        self.state = DONE
+        self.get_logger().info('✅ 전체 시퀀스 완료! 3초 후 홈 복귀')
+        threading.Timer(3.0, self._move_to_home).start()
 
     def _press_button(self, X: float, Y: float, Z: float, label: str = ''):
         phase_updown = (self.state == UPDOWN_PRESS)
@@ -500,10 +548,9 @@ class ArmElevatorNode(Node):
             self.get_logger().info('UP/DOWN 완료. 홈 복귀 후 점등 확인...')
             threading.Thread(target=self._return_home_then_wait, daemon=True).start()
         else:
-            self.status_pub.publish(String(data='NUMBER_PRESSED'))
-            self.state = DONE
-            self.get_logger().info('✅ 전체 시퀀스 완료! 3초 후 홈 복귀')
-            threading.Timer(3.0, self._move_to_home).start()
+            self.state = NUMBER_WAIT
+            self.get_logger().info('숫자 버튼 완료. 홈 복귀 후 점등→소등 확인...')
+            threading.Thread(target=self._return_home_then_wait_number, daemon=True).start()
 
     def _return_home_then_wait(self):
         ok = self._send_trajectory(HOME_JOINTS)

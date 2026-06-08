@@ -6,13 +6,13 @@
 상태 전이:
   IDLE
     → /start_pickup 수신
-  PICKUP  — 픽업 시퀀스 (9스텝)
+  PICKUP  — 픽업 시퀀스 (14스텝)
     → /pickup_done 발행
   ROOM_SIGN — ROOM_SIGN_JOINTS 이동 + YOLO+OCR 루프
     → /room_number 발행 (인식마다)
   WAITING_ALIGN — /aligned_ready 수신 대기
     → /aligned_ready 수신
-  DELIVER — 배달 시퀀스 (12스텝)
+  DELIVER — 배달 시퀀스 (15스텝)
     → /delivery_done 발행
   DONE → IDLE
 
