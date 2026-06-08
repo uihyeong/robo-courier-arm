@@ -301,7 +301,7 @@ class ArmElevatorNode(Node):
                 self.get_logger().info(f'{cls} 감지! IK 시작')
                 threading.Thread(
                     target=self._press_button,
-                    args=(X, 0.0, Z - 0.031, cls),
+                    args=(X, Y, Z - 0.031, cls),
                     daemon=True,
                 ).start()
 
