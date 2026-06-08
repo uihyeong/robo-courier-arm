@@ -77,17 +77,13 @@ ROOM_MODEL_PATH  = os.path.join(_REPO_ROOT, 'yolo', 'weights', 'best_room.pt')
 ROOM_CONF        = 0.83
 OCR_INTERVAL     = 5
 
-YOLO_MODEL_PATH   = 'yolov8n.pt'
+YOLO_MODEL_PATH   = os.path.join(_REPO_ROOT, 'yolo', 'weights', 'best_box.pt')
 YOLO_CONF         = 0.15
 GRAB_HOVER_OFFSET = 0.04
 DETECT_Z_OFFSET   = -0.02
 DETECT_Y_OFFSET   = -0.05
 
-HIGHLIGHT_CLASSES = {
-    'suitcase', 'backpack', 'handbag',
-    'book', 'bottle', 'cup', 'bowl', 'box',
-    'refrigerator',
-}
+HIGHLIGHT_CLASSES = {'Box'}
 
 # ─── 관절 상수 ────────────────────────────────────────────────────────────────
 
@@ -96,10 +92,12 @@ TABLE_LOOK_JOINTS   = [1.571,  -1.3963,  1.2217,  0.5236]
 BASKET_LOOK_JOINTS  = [-3.116, -0.387,   0.755,   1.164]
 BASKET_PLACE_JOINTS = [3.1032,  0.00767, 1.41126, -1.41433]
 BASKET_GRIP_JOINTS  = [3.122,   0.457,   0.831,   0.305]
-ROOM_SIGN_JOINTS    = [-3.141, -2.0203,  1.5002,  -0.044]
+ROOM_SIGN_JOINTS     = [-3.141, -2.0203,  1.5002,  -0.044]
+ELEVATOR_HOME_JOINTS = [-3.1400, -1.9190,  1.2701,  0.7240]
 
-GRIPPER_OPEN  = [0.020]
-GRIPPER_CLOSE = [0.000]
+GRIPPER_OPEN     = [0.020]
+GRIPPER_CLOSE    = [0.006]
+GRIPPER_ELEVATOR = [-0.007]
 
 MOVE_SPEED   = 0.4
 MIN_DURATION = 2.0
@@ -110,10 +108,16 @@ STEP_DELAY   = 1.5
 TABLE_HOVER  = ( 0.013,  0.298,  0.100)
 TABLE_GRIP   = ( 0.013,  0.298,  0.040)
 BASKET_HOVER = (-0.165,  0.009,  0.123)
-DEST_HOVER   = ( 0.013,  0.298,  0.100)
-DEST_PLACE   = ( 0.013,  0.298,  0.040)
+DEST_HOVER      = ( 0.013,  0.298,  0.100)
+DEST_HOVER_HIGH = ( 0.013,  0.298,  0.115)
+DEST_PLACE      = ( 0.013,  0.298,  0.040)
 
-# ─── AUTO_GRAB sentinel ───────────────────────────────────────────────────────
+# ─── sentinels ───────────────────────────────────────────────────────────────
+
+class _YoloWait:
+    """YOLO로 Box 감지될 때까지 대기 후 진행. joints 필드에 넣어 사용."""
+    def __init__(self, timeout=1.5):
+        self.timeout = timeout
 
 class _AutoGrab:
     """YOLO 감지 → IK → 잡기 자동화. joints 필드에 넣어 사용."""
@@ -122,34 +126,43 @@ class _AutoGrab:
 
 AUTO_GRAB_TABLE  = _AutoGrab(TABLE_GRIP)
 AUTO_GRAB_BASKET = _AutoGrab(BASKET_HOVER)
+YOLO_WAIT_BOX    = _YoloWait(timeout=1.5)
 
 # ─── 시퀀스 정의 ─────────────────────────────────────────────────────────────
 
 PICKUP_STEPS = [
-    ('홈',                             HOME_JOINTS,         None,         None),
-    ('책상 방향 확인 (joint1 오른쪽)',   TABLE_LOOK_JOINTS,   None,         None),
-    ('그리퍼 열기 (접근 전)',            None,                None,         GRIPPER_OPEN),
-    ('박스 위 호버',                     None,                TABLE_HOVER,  None),
-    ('박스 잡기 위치',                   None,                TABLE_GRIP,   None),
-    ('그리퍼 닫기 (잡기)',               None,                None,         GRIPPER_CLOSE),
-    ('바구니에 내려놓기',                BASKET_PLACE_JOINTS, None,         None),
-    ('그리퍼 열기 (박스 놓기)',          None,                None,         GRIPPER_OPEN),
-    ('홈 복귀',                          HOME_JOINTS,         None,         None),
+    ('홈',                             HOME_JOINTS,          None,         None),
+    ('책상 방향 + YOLO 박스 확인',       TABLE_LOOK_JOINTS,    None,         None),
+    ('YOLO 박스 인식 대기',              YOLO_WAIT_BOX,        None,         None),
+    ('그리퍼 열기 (접근 전)',            None,                 None,         GRIPPER_OPEN),
+    ('박스 위 호버',                     None,                 TABLE_HOVER,  None),
+    ('박스 잡기 위치',                   None,                 TABLE_GRIP,   None),
+    ('그리퍼 닫기 (잡기)',               None,                 None,         GRIPPER_CLOSE),
+    ('바구니에 내려놓기',                BASKET_PLACE_JOINTS,  None,         None),
+    ('홈 복귀',                          HOME_JOINTS,          None,         None),
+    ('바구니 확인',                       BASKET_LOOK_JOINTS,   None,         None),
+    ('바구니 박스 잡기',                  BASKET_GRIP_JOINTS,   None,         None),
+    ('그리퍼 열기 (박스 놓기)',           None,                 None,         GRIPPER_OPEN),
+    ('엘리베이터 홈 복귀',               ELEVATOR_HOME_JOINTS, None,         None),
+    ('그리퍼 닫기 (대기 자세)',           None,                 None,         GRIPPER_ELEVATOR),
 ]
 
 DELIVER_STEPS = [
-    ('홈',                              HOME_JOINTS,         None,         None),
-    ('바구니 확인 (joint4 틸트)',         BASKET_LOOK_JOINTS,  None,         None),
-    ('그리퍼 열기 (접근 전)',             None,                None,         GRIPPER_OPEN),
-    ('바구니 박스 잡기',                  BASKET_GRIP_JOINTS,  None,         None),
-    ('그리퍼 닫기 (잡기)',                None,                None,         GRIPPER_CLOSE),
-    ('박스 들어올리기',                   None,                BASKET_HOVER, None),
-    ('목적지 방향 확인 (joint1 오른쪽)',  TABLE_LOOK_JOINTS,   None,         None),
-    ('목적지 책상 위 호버',               None,                DEST_HOVER,   None),
-    ('목적지에 내려놓기',                 None,                DEST_PLACE,   None),
-    ('그리퍼 열기 (박스 놓기)',           None,                None,         GRIPPER_OPEN),
-    ('위로 호버',                         None,                DEST_HOVER,   None),
-    ('홈 복귀',                           HOME_JOINTS,         None,         None),
+    ('홈',                              HOME_JOINTS,          None,         None),
+    ('바구니 확인 (joint4 틸트)',         BASKET_LOOK_JOINTS,   None,         None),
+    ('YOLO 박스 인식 대기',              YOLO_WAIT_BOX,        None,         None),
+    ('그리퍼 열기 (접근 전)',             None,                 None,         GRIPPER_OPEN),
+    ('바구니 박스 잡기',                  BASKET_GRIP_JOINTS,   None,         None),
+    ('그리퍼 닫기 (잡기)',                None,                 None,         GRIPPER_CLOSE),
+    ('바구니 확인 (잡기 후)',             BASKET_LOOK_JOINTS,   None,         None),
+    ('박스 들어올리기',                   None,                 BASKET_HOVER, None),
+    ('목적지 방향 확인 (joint1 오른쪽)',  TABLE_LOOK_JOINTS,    None,         None),
+    ('목적지 책상 위 호버',               None,                 DEST_HOVER,   None),
+    ('목적지에 내려놓기',                 None,                 DEST_PLACE,   None),
+    ('그리퍼 열기 (박스 놓기)',           None,                 None,         GRIPPER_OPEN),
+    ('위로 호버',                         None,                 DEST_HOVER_HIGH, None),
+    ('엘리베이터 홈 복귀',               ELEVATOR_HOME_JOINTS, None,         None),
+    ('그리퍼 닫기 (대기 자세)',           None,                 None,         GRIPPER_ELEVATOR),
 ]
 
 # ─── 상태 상수 ────────────────────────────────────────────────────────────────
@@ -195,8 +208,8 @@ class ArmDeliveryNode(Node):
         self._frame_lock    = threading.Lock()
         self._frame_count   = 0
         self.depth_image    = None
-        self.fx, self.fy    = 615.0, 615.0
-        self.cx, self.cy    = 320.0, 240.0
+        self.fx, self.fy    = 1380.0, 1380.0
+        self.cx, self.cy    = 960.0, 540.0
 
         self.tf_buffer   = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -312,6 +325,23 @@ class ArmDeliveryNode(Node):
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
             time.sleep(0.05)
+
+    # ─── YOLO 박스 인식 대기 ────────────────────────────────────────────────────
+
+    def _wait_yolo_box(self, timeout: float) -> bool:
+        if self._grab_model is None:
+            return False
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            frame = self._latest_frame
+            if frame is not None:
+                results = self._grab_model(frame, conf=YOLO_CONF, verbose=False)[0]
+                for box in results.boxes:
+                    if results.names[int(box.cls)] in HIGHLIGHT_CLASSES:
+                        self.get_logger().info('YOLO 박스 감지 확인')
+                        return True
+            time.sleep(0.1)
+        return False
 
     # ─── AUTO_GRAB: YOLO 감지 → 3D 변환 → IK → 잡기 ─────────────────────────
 
@@ -484,7 +514,10 @@ class ArmDeliveryNode(Node):
             if gripper is not None:
                 self.send_gripper(gripper)
 
-            if isinstance(joints, _AutoGrab):
+            if isinstance(joints, _YoloWait):
+                if not self._wait_yolo_box(joints.timeout):
+                    self.get_logger().warn('YOLO 박스 미감지 → 진행')
+            elif isinstance(joints, _AutoGrab):
                 if not self._detect_and_grab(joints.fallback_xyz):
                     self.get_logger().error(f'{label} 실패')
                     return False
