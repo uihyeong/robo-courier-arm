@@ -21,6 +21,7 @@ setup(
         'console_scripts': [
             'arm_elevator     = courier_arm.arm_elevator:main',
             'arm_delivery     = courier_arm.arm_delivery:main',
+            'arm_recover      = courier_arm.arm_recover:main',
             'contact_detector = courier_arm.contact_detector:main',
             'detect_room_sign = courier_arm.detect_room_sign:main',
             'scout            = courier_arm.scout:main',

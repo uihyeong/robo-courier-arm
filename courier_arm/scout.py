@@ -52,7 +52,7 @@ from std_msgs.msg import Bool, Int32, String
 # ─── 웨이포인트 / 맵 설정 ─────────────────────────────────────────────────────
 # TODO: 팀원에게 파일 경로 확인 후 수정
 
-WAYPOINTS_FILE = os.path.join(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')), 'rooms.yaml')  # 호수별 좌표
+WAYPOINTS_FILE = os.path.expanduser('~/rooms.yaml')  # 호수별 좌표
 
 # ─── 상태 상수 ────────────────────────────────────────────────────────────────
 

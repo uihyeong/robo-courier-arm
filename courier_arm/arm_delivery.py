@@ -27,12 +27,14 @@
 실행:
   ros2 launch open_manipulator_x_bringup hardware.launch.py
   ros2 launch realsense2_camera rs_launch.py
-  ros2 run courier_arm arm_delivery
+  python3 nodes/real_robot/arm_delivery.py
   ros2 topic pub --once /start_pickup std_msgs/Bool "{data: true}"
 """
 
+import datetime
 import math
 import os
+import re
 import threading
 import time
 
@@ -41,14 +43,14 @@ import rclpy
 import rclpy.time
 import tf2_ros
 import tf2_geometry_msgs
+from builtin_interfaces.msg import Duration
 from control_msgs.action import FollowJointTrajectory, GripperCommand
 from geometry_msgs.msg import PointStamped
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, JointState
 from std_msgs.msg import Bool, String
-
-from courier_arm.ik import solve_ik, make_trajectory, JOINT_NAMES
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 try:
     import cv2
@@ -74,16 +76,33 @@ except ImportError:
 
 _REPO_ROOT       = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 ROOM_MODEL_PATH  = os.path.join(_REPO_ROOT, 'yolo', 'weights', 'best_room.pt')
-ROOM_CONF        = 0.83
+ROOM_CONF        = 0.6
 OCR_INTERVAL     = 5
 
 YOLO_MODEL_PATH   = os.path.join(_REPO_ROOT, 'yolo', 'weights', 'best_box.pt')
-YOLO_CONF         = 0.15
-GRAB_HOVER_OFFSET = 0.04
+YOLO_CONF         = 0.70
+GRAB_HOVER_OFFSET = 0.04   # 감지 지점 위 4cm 호버
 DETECT_Z_OFFSET   = -0.02
 DETECT_Y_OFFSET   = -0.05
 
 HIGHLIGHT_CLASSES = {'Box'}
+
+# ─── 링크 파라미터 ────────────────────────────────────────────────────────────
+
+L1    = 0.0595
+L2    = math.sqrt(0.024**2 + 0.128**2)
+ALPHA = math.atan2(0.128, 0.024)
+L3    = 0.124
+L4    = 0.126
+
+JOINT_LIMITS = [
+    (-math.pi, math.pi),
+    (-2.0,     1.5),
+    (-1.5,     1.4),
+    (-1.7,     1.97),
+]
+
+JOINT_NAMES = ['joint1', 'joint2', 'joint3', 'joint4']
 
 # ─── 관절 상수 ────────────────────────────────────────────────────────────────
 
@@ -92,8 +111,10 @@ TABLE_LOOK_JOINTS   = [1.571,  -1.3963,  1.2217,  0.5236]
 BASKET_LOOK_JOINTS  = [-3.116, -0.387,   0.755,   1.164]
 BASKET_PLACE_JOINTS = [3.1032,  0.00767, 1.41126, -1.41433]
 BASKET_GRIP_JOINTS  = [3.122,   0.457,   0.831,   0.305]
-ROOM_SIGN_JOINTS     = [-3.141, -2.0203,  1.5002,  -0.044]
-ELEVATOR_HOME_JOINTS = [-3.1400, -1.9190,  1.2701,  0.7240]
+ROOM_SIGN_JOINTS    = [ 1.571, -2.0203,  1.5002,  -0.044]
+# joint1 을 +3.140(=+pi 쪽)으로. -3.140 과 물리적으로 같은 자세지만 HOME(+3.141)과
+# 같은 부호 쪽에 둬서 +pi/-pi wrap(한 바퀴 회전) 위험을 제거. (arm_recover 와 동일하게 유지)
+ELEVATOR_HOME_JOINTS = [3.1400, -1.9190,  1.2701,  0.7240]
 
 GRIPPER_OPEN     = [0.020]
 GRIPPER_CLOSE    = [0.006]
@@ -101,53 +122,59 @@ GRIPPER_ELEVATOR = [-0.007]
 
 MOVE_SPEED   = 0.4
 MIN_DURATION = 2.0
-STEP_DELAY   = 1.5
+STEP_DELAY   = 1.0  # 스텝 완료 후 다음 스텝 전 대기 (초)
+# 단일 관절 1회 이동 안전 상한(rad). 이보다 크면 위험 동작으로 보고 차단(한 바퀴 회전 방지).
+# 180°(π) 정상 이동은 허용하고 360°(2π) 회전만 막도록 4.5 로 통일(3 노드 공통).
+MAX_JOINT_STEP = 4.5
 
 # ─── 웨이포인트 ───────────────────────────────────────────────────────────────
 
-TABLE_HOVER  = ( 0.013,  0.298,  0.100)
-TABLE_GRIP   = ( 0.013,  0.298,  0.040)
+TABLE_HOVER  = ( 0.013,  0.360,  0.100)
+TABLE_GRIP   = ( 0.013,  0.360,  0.040)
 BASKET_HOVER = (-0.165,  0.009,  0.123)
-DEST_HOVER      = ( 0.013,  0.298,  0.100)
-DEST_HOVER_HIGH = ( 0.013,  0.298,  0.115)
-DEST_PLACE      = ( 0.013,  0.298,  0.040)
+DEST_HOVER      = ( 0.013,  0.360,  0.100)
+DEST_HOVER_HIGH = ( 0.013,  0.360,  0.115)
+DEST_PLACE      = ( 0.013,  0.360,  0.040)
 
 # ─── sentinels ───────────────────────────────────────────────────────────────
-
-class _YoloWait:
-    """YOLO로 Box 감지될 때까지 대기 후 진행. joints 필드에 넣어 사용."""
-    def __init__(self, timeout=1.5):
-        self.timeout = timeout
 
 class _AutoGrab:
     """YOLO 감지 → IK → 잡기 자동화. joints 필드에 넣어 사용."""
     def __init__(self, fallback_xyz):
         self.fallback_xyz = fallback_xyz
 
+class _YoloWait:
+    """YOLO로 Box 감지될 때까지 대기 후 진행. joints 필드에 넣어 사용."""
+    def __init__(self, timeout=1.5):
+        self.timeout = timeout
+
 AUTO_GRAB_TABLE  = _AutoGrab(TABLE_GRIP)
 AUTO_GRAB_BASKET = _AutoGrab(BASKET_HOVER)
 YOLO_WAIT_BOX    = _YoloWait(timeout=1.5)
 
 # ─── 시퀀스 정의 ─────────────────────────────────────────────────────────────
+# 각 스텝: (설명, joints_or_AutoGrab_or_None, xyz_or_None, gripper_or_None)
+# _AutoGrab 스텝은 내부에서 그리퍼 닫기까지 처리
 
 PICKUP_STEPS = [
-    ('홈',                             HOME_JOINTS,          None,         None),
-    ('책상 방향 + YOLO 박스 확인',       TABLE_LOOK_JOINTS,    None,         None),
-    ('YOLO 박스 인식 대기',              YOLO_WAIT_BOX,        None,         None),
-    ('그리퍼 열기 (접근 전)',            None,                 None,         GRIPPER_OPEN),
-    ('박스 위 호버',                     None,                 TABLE_HOVER,  None),
-    ('박스 잡기 위치',                   None,                 TABLE_GRIP,   None),
-    ('그리퍼 닫기 (잡기)',               None,                 None,         GRIPPER_CLOSE),
-    ('바구니에 내려놓기',                BASKET_PLACE_JOINTS,  None,         None),
-    ('홈 복귀',                          HOME_JOINTS,          None,         None),
-    ('바구니 확인',                       BASKET_LOOK_JOINTS,   None,         None),
-    ('바구니 박스 잡기',                  BASKET_GRIP_JOINTS,   None,         None),
-    ('그리퍼 열기 (박스 놓기)',           None,                 None,         GRIPPER_OPEN),
-    ('엘리베이터 홈 복귀',               ELEVATOR_HOME_JOINTS, None,         None),
-    ('그리퍼 닫기 (대기 자세)',           None,                 None,         GRIPPER_ELEVATOR),
+    ('홈',                             HOME_JOINTS,         None,         None),
+    ('책상 방향 + YOLO 박스 확인',       TABLE_LOOK_JOINTS,   None,         None),
+    ('YOLO 박스 인식 대기',              YOLO_WAIT_BOX,       None,         None),
+    ('그리퍼 열기 (접근 전)',            None,                None,         GRIPPER_OPEN),
+    ('박스 위 호버',                     None,                TABLE_HOVER,  None),
+    ('박스 잡기 위치',                   None,                TABLE_GRIP,   None),
+    ('그리퍼 닫기 (잡기)',               None,                None,         GRIPPER_CLOSE),
+    ('바구니에 내려놓기',                BASKET_PLACE_JOINTS,  None,  None),
+    ('홈 복귀',                          HOME_JOINTS,          None,  None),
+    ('바구니 확인',                       BASKET_LOOK_JOINTS,   None,  None),
+    ('바구니 박스 잡기',                  BASKET_GRIP_JOINTS,   None,  None),
+    ('그리퍼 열기 (박스 놓기)',           None,                 None,  GRIPPER_OPEN),
+    ('엘리베이터 홈 복귀',               ELEVATOR_HOME_JOINTS, None,  None),
+    ('그리퍼 닫기 (대기 자세)',           None,                 None,  GRIPPER_ELEVATOR),
 ]
 
 DELIVER_STEPS = [
+    ('호수 확인',                        ROOM_SIGN_JOINTS,     None,         None),
     ('홈',                              HOME_JOINTS,          None,         None),
     ('바구니 확인 (joint4 틸트)',         BASKET_LOOK_JOINTS,   None,         None),
     ('YOLO 박스 인식 대기',              YOLO_WAIT_BOX,        None,         None),
@@ -161,6 +188,7 @@ DELIVER_STEPS = [
     ('목적지에 내려놓기',                 None,                 DEST_PLACE,   None),
     ('그리퍼 열기 (박스 놓기)',           None,                 None,         GRIPPER_OPEN),
     ('위로 호버',                         None,                 DEST_HOVER_HIGH, None),
+    ('목적지 방향 확인 (joint1 오른쪽)',  TABLE_LOOK_JOINTS,    None,         None),
     ('엘리베이터 홈 복귀',               ELEVATOR_HOME_JOINTS, None,         None),
     ('그리퍼 닫기 (대기 자세)',           None,                 None,         GRIPPER_ELEVATOR),
 ]
@@ -173,6 +201,56 @@ ROOM_SIGN      = 'ROOM_SIGN'
 WAITING_ALIGN  = 'WAITING_ALIGN'
 DELIVER        = 'DELIVER'
 DONE           = 'DONE'
+
+# ─── IK ──────────────────────────────────────────────────────────────────────
+
+def solve_ik(X, Y, Z):
+    j1 = math.atan2(Y, X)
+    r  = math.sqrt(X**2 + Y**2)
+    dr = r - L4
+    dz = Z - L1
+    D  = math.sqrt(dr**2 + dz**2)
+    if D > (L2 + L3) * 0.999 or D < abs(L2 - L3) * 1.001:
+        return None
+    c_psi = max(-1.0, min(1.0, (D**2 - L2**2 - L3**2) / (2.0 * L2 * L3)))
+    for psi in (-math.acos(c_psi), math.acos(c_psi)):
+        s_psi  = math.sin(psi)
+        gamma  = math.atan2(L3 * s_psi, L2 + L3 * c_psi)
+        alpha1 = math.atan2(dz, dr) - gamma
+        j2     = ALPHA - alpha1
+        j3     = -psi - ALPHA
+        j4     = -(j2 + j3)
+        angles = [j1, j2, j3, j4]
+        if all(lo <= a <= hi for a, (lo, hi) in zip(angles, JOINT_LIMITS)):
+            return angles
+    return None
+
+
+def _shortest_path(target, current):
+    diff = (target - current + math.pi) % (2 * math.pi) - math.pi
+    return current + diff
+
+
+def make_trajectory(target_joints, current_joints):
+    target_joints = [_shortest_path(t, c) for t, c in zip(target_joints, current_joints)]
+    # 관절 한계로 클램프 (_shortest_path 는 한계를 무시하므로 필수)
+    target_joints = [max(lo, min(hi, t))
+                     for t, (lo, hi) in zip(target_joints, JOINT_LIMITS)]
+    max_disp = max(abs(t - c) for t, c in zip(target_joints, current_joints))
+    # 과대 이동(한 바퀴 회전 등)이면 None 반환 → 호출부에서 중단
+    if max_disp > MAX_JOINT_STEP:
+        return None, max_disp
+    duration = max(max_disp / MOVE_SPEED, MIN_DURATION)
+    traj = JointTrajectory()
+    traj.joint_names = JOINT_NAMES
+    pt = JointTrajectoryPoint()
+    pt.positions = target_joints
+    pt.velocities = [0.0] * 4
+    secs  = int(duration)
+    nsecs = int((duration - secs) * 1e9)
+    pt.time_from_start = Duration(sec=secs, nanosec=nsecs)
+    traj.points.append(pt)
+    return traj, duration
 
 
 # ─── 노드 ────────────────────────────────────────────────────────────────────
@@ -192,17 +270,22 @@ class ArmDeliveryNode(Node):
             self, GripperCommand,
             '/gripper_controller/gripper_cmd')
 
+        # 발행
         self.status_pub   = self.create_publisher(String, '/robot_status',  10)
         self.pickup_pub   = self.create_publisher(Bool,   '/pickup_done',   10)
         self.room_pub     = self.create_publisher(String, '/room_number',   10)
         self.delivery_pub = self.create_publisher(Bool,   '/delivery_done', 10)
 
+        # 구독
         self.create_subscription(JointState, '/joint_states',   self._cb_joints,        10)
         self.create_subscription(Bool,       '/start_pickup',   self._cb_start_pickup,  10)
         self.create_subscription(Bool,       '/aligned_ready',  self._cb_aligned_ready, 10)
+        # 박스 사전 적재용: 픽업/OCR 없이 IDLE 에서 바로 배달(DELIVER) 시퀀스 실행
+        self.create_subscription(Bool,       '/start_delivery', self._cb_start_delivery, 10)
 
         self._aligned_ready_event = threading.Event()
 
+        # 카메라 공통
         self.bridge         = None
         self._latest_frame  = None
         self._frame_lock    = threading.Lock()
@@ -211,15 +294,24 @@ class ArmDeliveryNode(Node):
         self.fx, self.fy    = 1380.0, 1380.0
         self.cx, self.cy    = 960.0, 540.0
 
+        # TF
         self.tf_buffer   = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
+        # YOLO (박스 감지용)
         self._grab_model      = None
         self._current_step_en = 'Waiting'
+        self._box_yolo_active = False  # TABLE_LOOK_JOINTS 스텝에서만 True
+        self._writer          = None
+        _ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        self._record_path = os.path.expanduser(f'~/recordings/delivery_{_ts}.mp4')
 
+        # 호수 인식용
         self._room_model    = None
         self._ocr           = None
         self._ocr_active    = False
+        self._latest_room_text = None
+        self._latest_room_bbox = None
 
         if _CV_AVAILABLE:
             self.bridge = CvBridge()
@@ -280,6 +372,30 @@ class ArmDeliveryNode(Node):
         else:
             self.get_logger().warn(f'/aligned_ready 무시 (state={self.state})')
 
+    def _cb_start_delivery(self, msg: Bool):
+        """박스가 바구니에 사전 적재된 상태에서 픽업/OCR 없이 배달만 실행."""
+        if not msg.data:
+            return
+        if self.state != IDLE:
+            self.get_logger().warn(f'작업 중 ({self.state}). /start_delivery 무시.')
+            return
+        self.get_logger().info('/start_delivery 수신 → 배달(DELIVER) 시퀀스 바로 시작')
+        self.state = DELIVER
+        threading.Thread(target=self._run_delivery_only_flow, daemon=True).start()
+
+    def _run_delivery_only_flow(self):
+        ok = self._run_sequence(DELIVER_STEPS, '배달')
+        if not ok:
+            self.get_logger().error('배달 실패')
+            self.status_pub.publish(String(data='FAILED'))
+            self.state = IDLE
+            return
+        self.get_logger().info('✅ 배달 완료')
+        self.status_pub.publish(String(data='DELIVERY_DONE'))
+        self.delivery_pub.publish(Bool(data=True))
+        self.state = IDLE
+        self.get_logger().info('✅ /start_pickup 또는 /start_delivery 대기 중...')
+
     def _cb_image(self, msg: ImageMsg):
         frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
         with self._frame_lock:
@@ -299,6 +415,13 @@ class ArmDeliveryNode(Node):
 
     # ─── YOLO 시각화 루프 ────────────────────────────────────────────────────
 
+    def _write_frame(self, frame):
+        if self._writer is None:
+            h, w = frame.shape[:2]
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            self._writer = cv2.VideoWriter(self._record_path, fourcc, 20, (w, h))
+        self._writer.write(frame)
+
     def _yolo_display_loop(self):
         while rclpy.ok():
             with self._frame_lock:
@@ -307,13 +430,43 @@ class ArmDeliveryNode(Node):
                 time.sleep(0.05)
                 continue
 
+            if not self._box_yolo_active:
+                vis = frame.copy()
+                cv2.putText(vis, f'Step: {self._current_step_en}',
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                if self._latest_room_bbox is not None:
+                    rx1, ry1, rx2, ry2 = self._latest_room_bbox
+                    cv2.rectangle(vis, (rx1, ry1), (rx2, ry2), (0, 165, 255), 2)
+                    cv2.putText(vis, f'Room: {self._latest_room_text}',
+                                (rx1, max(ry1 - 8, 12)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+                self._write_frame(vis)
+                cv2.imshow('Delivery YOLO', vis)
+                cv2.waitKey(1)
+                time.sleep(0.05)
+                continue
+
             results = self._grab_model(frame, conf=YOLO_CONF, verbose=False)[0]
             vis = frame.copy()
+            with self.lock:
+                depth = self.depth_image.copy() if self.depth_image is not None else None
             for box in results.boxes:
                 cls_name = results.names[int(box.cls)]
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 color         = (0, 255, 0) if cls_name in HIGHLIGHT_CLASSES else (160, 160, 160)
                 display_label = 'box' if cls_name in HIGHLIGHT_CLASSES else cls_name
+                if cls_name in HIGHLIGHT_CLASSES and depth is not None:
+                    cx_px = (x1 + x2) // 2
+                    cy_px = y1 + int((y2 - y1) * 0.75)
+                    h, w = depth.shape
+                    region = depth[max(0, cy_px-2):min(h, cy_px+3),
+                                   max(0, cx_px-2):min(w, cx_px+3)]
+                    valid = region[(region > 0.1) & ~np.isnan(region)]
+                    if len(valid) > 0:
+                        d = float(np.median(valid))
+                        X = (cx_px - self.cx) / self.fx * d
+                        Y = (cy_px - self.cy) / self.fy * d
+                        display_label = f'box ({X:.3f}, {Y:.3f}, {d:.3f})'
                 cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
                 cv2.putText(vis, display_label,
                             (x1, max(y1 - 8, 12)),
@@ -321,6 +474,14 @@ class ArmDeliveryNode(Node):
 
             cv2.putText(vis, f'Step: {self._current_step_en}',
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+
+            if self._latest_room_bbox is not None:
+                rx1, ry1, rx2, ry2 = self._latest_room_bbox
+                cv2.rectangle(vis, (rx1, ry1), (rx2, ry2), (0, 165, 255), 2)
+                cv2.putText(vis, f'Room: {self._latest_room_text}', (rx1, max(ry1 - 8, 12)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+
+            self._write_frame(vis)
             cv2.imshow('Delivery YOLO', vis)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
@@ -442,7 +603,9 @@ class ArmDeliveryNode(Node):
             conf = float(box.conf)
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             h, w = frame.shape[:2]
-            roi = frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+            # bbox 위쪽 40%만 크롭 — 숫자는 상단, 영어는 하단
+            y_cut = y1 + int((y2 - y1) * 0.4)
+            roi = frame[max(0, y1):min(h, y_cut), max(0, x1):min(w, x2)]
             if roi.size == 0:
                 continue
 
@@ -450,17 +613,24 @@ class ArmDeliveryNode(Node):
             if room_text:
                 self.get_logger().info(f'호수 인식: {room_text} (conf={conf:.2f})')
                 self.room_pub.publish(String(data=room_text))
+                self._latest_room_text = room_text
+                self._latest_room_bbox = (x1, y1, x2, y2)
 
     def _run_ocr(self, roi) -> str | None:
         if self._ocr is None:
             return None
-        results = self._ocr.readtext(roi, allowlist='0123456789BbGg', detail=0)
+        results = self._ocr.readtext(roi, allowlist='0123456789', detail=0)
         text = ''.join(results).strip()
-        return text if text else None
+        m = re.match(r'\d+', text)
+        if not m:
+            return None
+        digits = m.group()
+        return digits if len(digits) >= 3 else None
 
     # ─── 전체 흐름 ────────────────────────────────────────────────────────────
 
     def _run_pickup_flow(self):
+        # 1. 픽업 시퀀스
         self.get_logger().info('픽업 시퀀스 시작')
         ok = self._run_sequence(PICKUP_STEPS, '픽업')
         if not ok:
@@ -473,19 +643,13 @@ class ArmDeliveryNode(Node):
         self.status_pub.publish(String(data='PICKUP_DONE'))
         self.pickup_pub.publish(Bool(data=True))
 
-        self.state = ROOM_SIGN
-        self.get_logger().info('호수 번호판 인식 시작 → ROOM_SIGN_JOINTS 이동')
-        self.move_to_joints(ROOM_SIGN_JOINTS, 'room_sign')
-
-        self._frame_count = 0
-        self._ocr_active  = True
-
+        # 2. /aligned_ready 대기
         self.state = WAITING_ALIGN
-        self.get_logger().info('OCR 실행 중. /aligned_ready 대기...')
+        self.get_logger().info('/aligned_ready 대기...')
         self._aligned_ready_event.clear()
         self._aligned_ready_event.wait()
-        self._ocr_active = False
 
+        # 3. 배달 시퀀스 (DELIVER_STEPS 첫 스텝 ROOM_SIGN_JOINTS에서 OCR 자동 활성)
         self.state = DELIVER
         self.get_logger().info('배달 시퀀스 시작')
         ok = self._run_sequence(DELIVER_STEPS, '배달')
@@ -499,6 +663,7 @@ class ArmDeliveryNode(Node):
         self.status_pub.publish(String(data='DELIVERY_DONE'))
         self.delivery_pub.publish(Bool(data=True))
 
+        self.state = DONE
         self.state = IDLE
         self.get_logger().info('✅ 전체 배달 시퀀스 완료. /start_pickup 대기 중...')
 
@@ -509,6 +674,14 @@ class ArmDeliveryNode(Node):
         for i, (label, joints, xyz, gripper) in enumerate(steps):
             self.get_logger().info(f'[{i+1}/{len(steps)}] {label}')
             self._current_step_en = f'[{i+1}/{len(steps)}] {label}'
+            # 박스 YOLO는 오른쪽으로 돌았을때(TABLE_LOOK_JOINTS)와 YOLO_WAIT 스텝에서만 활성
+            self._box_yolo_active = (joints is TABLE_LOOK_JOINTS or isinstance(joints, _YoloWait))
+            # OCR은 ROOM_SIGN_JOINTS 스텝에서만 활성
+            if joints is ROOM_SIGN_JOINTS:
+                self._frame_count = 0
+            self._ocr_active = (joints is ROOM_SIGN_JOINTS)
+            if not self._ocr_active:
+                self._latest_room_bbox = None
             time.sleep(STEP_DELAY)
 
             if gripper is not None:
@@ -533,6 +706,9 @@ class ArmDeliveryNode(Node):
                         self.get_logger().error(f'{label} 실패')
                         return False
 
+        self._box_yolo_active = False
+        self._ocr_active = False
+        self._latest_room_bbox = None
         self._current_step_en = f'{name} Done'
         self.get_logger().info(f'{name} 시퀀스 완료')
         return True
@@ -546,13 +722,26 @@ class ArmDeliveryNode(Node):
 
         with self.lock:
             js = self.current_joints
-        current = [0.0] * 4
-        if js:
-            for i, name in enumerate(JOINT_NAMES):
-                if name in js.name:
-                    current[i] = js.position[js.name.index(name)]
+        # 안전장치: /joint_states 가 없으면 현재값을 0 으로 가정하지 않는다.
+        # (0 으로 가정하면 +pi/-pi 경계에서 한 바퀴 회전하는 위험 동작이 발생)
+        if js is None:
+            self.get_logger().error('/joint_states 미수신 → 안전을 위해 이동 중단')
+            return False
+        current = [None] * 4
+        for i, name in enumerate(JOINT_NAMES):
+            if name in js.name:
+                current[i] = js.position[js.name.index(name)]
+        if any(c is None for c in current):
+            self.get_logger().error(f'joint_states 관절 누락 {current} → 이동 중단')
+            return False
 
-        traj, duration = make_trajectory(joints, current, MOVE_SPEED)
+        traj, duration = make_trajectory(joints, current)
+        if traj is None:
+            self.get_logger().error(
+                f'{label}: 단일 관절 이동량 {duration:.2f}rad 과대(>{MAX_JOINT_STEP}) '
+                f'→ 위험 동작 차단, 이동 중단 (current={[round(c,3) for c in current]}, '
+                f'target={[round(t,3) for t in joints]})')
+            return False
         goal = FollowJointTrajectory.Goal()
         goal.trajectory = traj
         self.status_pub.publish(String(data='MOVING'))
@@ -647,6 +836,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        if node._writer is not None:
+            node._writer.release()
         if _CV_AVAILABLE:
             import cv2 as _cv2
             _cv2.destroyAllWindows()

@@ -32,10 +32,10 @@ Mounted on a Scout Mini mobile robot as part of an autonomous delivery system.
 
 ```
 robo-courier-arm/
-├── elevator_robot/
-│   ├── ik.py                  # Shared analytical IK (OpenMANIPULATOR-X)
+├── courier_arm/
 │   ├── arm_elevator.py        # Elevator button pressing node
 │   ├── arm_delivery.py        # Pick-and-place delivery node
+│   ├── arm_recover.py         # Room sign + door handle recovery node
 │   ├── contact_detector.py    # Collision detection node
 │   ├── detect_room_sign.py    # Room number sign recognition node
 │   └── scout.py               # Scout Mini integration skeleton
@@ -44,7 +44,8 @@ robo-courier-arm/
 ├── yolo/weights/
 │   ├── best.pt                # UP/DOWN button detection model
 │   ├── best_num.pt            # Floor number detection model
-│   └── best_room.pt           # Room sign detection model
+│   ├── best_room.pt           # Room sign detection model
+│   └── best_handle.pt         # Door handle detection model
 └── rooms.yaml                 # Room number → navigation waypoint mapping
 ```
 
@@ -55,11 +56,11 @@ robo-courier-arm/
 ```bash
 # Clone into your colcon workspace
 cd ~/colcon_ws/src
-git clone https://github.com/uihyeong/robo-courier-arm.git elevator_robot
+git clone https://github.com/uihyeong/robo-courier-arm.git courier_arm
 
 # Build
 cd ~/colcon_ws
-colcon build --packages-select elevator_robot --symlink-install
+colcon build --packages-select courier_arm --symlink-install
 source install/setup.bash
 ```
 
@@ -87,7 +88,7 @@ ros2 run tf2_ros static_transform_publisher \
   --frame-id link5 --child-frame-id camera_link
 
 # 4. Run node (+ optional contact detector)
-ros2 launch elevator_robot elevator.launch.py
+ros2 launch courier_arm elevator.launch.py
 
 # 5. Send target floor
 ros2 topic pub --once /target_floor std_msgs/Int32 "{data: 3}"
@@ -96,7 +97,7 @@ ros2 topic pub --once /target_floor std_msgs/Int32 "{data: 3}"
 ### Delivery Mode
 
 ```bash
-ros2 run elevator_robot arm_delivery
+ros2 run courier_arm arm_delivery
 
 # Trigger pickup
 ros2 topic pub --once /start_pickup std_msgs/Bool "{data: true}"
