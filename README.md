@@ -9,6 +9,7 @@ Mounted on a Scout Mini mobile robot as part of an autonomous delivery system.
 
 - **Elevator button pressing** — Detects UP/DOWN and floor buttons using YOLOv8 + EasyOCR, then presses them via analytical IK
 - **Pick-and-place delivery** — Picks up a package from a table, reads the room number sign, and delivers to the destination
+- **Package recovery** — Re-acquires the FreshBag (insulated delivery bag) onto its hook using YOLO detection
 - **Contact detection** — Monitors joint effort to detect unexpected collisions and retract automatically
 
 ## Hardware
@@ -35,7 +36,7 @@ robo-courier-arm/
 ├── courier_arm/
 │   ├── arm_elevator.py        # Elevator button pressing node
 │   ├── arm_delivery.py        # Pick-and-place delivery node
-│   ├── arm_recover.py         # Room sign + door handle recovery node
+│   ├── arm_recover.py         # FreshBag recovery node (re-hook the delivery bag)
 │   ├── contact_detector.py    # Collision detection node
 │   ├── detect_room_sign.py    # Room number sign recognition node
 │   └── scout.py               # Scout Mini integration skeleton
@@ -45,7 +46,7 @@ robo-courier-arm/
 │   ├── best.pt                # UP/DOWN button detection model
 │   ├── best_num.pt            # Floor number detection model
 │   ├── best_room.pt           # Room sign detection model
-│   └── best_handle.pt         # Door handle detection model
+│   └── best_handle.pt         # Bag handle detection model
 └── rooms.yaml                 # Room number → navigation waypoint mapping
 ```
 
@@ -78,8 +79,10 @@ source install/setup.bash
 # 1. Hardware controller
 ros2 launch open_manipulator_x_bringup hardware.launch.py
 
-# 2. Camera
-ros2 launch realsense2_camera rs_launch.py
+# 2. Camera (aligned depth + 1080p — required by the nodes)
+ros2 launch realsense2_camera rs_launch.py \
+  align_depth.enable:=true \
+  rgb_camera.color_profile:=1920,1080,30
 
 # 3. Camera TF
 ros2 run tf2_ros static_transform_publisher \
@@ -99,28 +102,50 @@ ros2 topic pub --once /target_floor std_msgs/Int32 "{data: 3}"
 ```bash
 ros2 run courier_arm arm_delivery
 
-# Trigger pickup
+# Trigger pickup (package on table → Scout Mini basket)
 ros2 topic pub --once /start_pickup std_msgs/Bool "{data: true}"
 
 # Signal arrival at destination (after Scout Mini aligns)
 ros2 topic pub --once /aligned_ready std_msgs/Bool "{data: true}"
+
+# (optional) Trigger the delivery sequence directly
+ros2 topic pub --once /start_delivery std_msgs/Bool "{data: true}"
+```
+
+### Recovery Mode
+
+```bash
+ros2 run courier_arm arm_recover
+
+# Trigger FreshBag recovery (re-hook the bag onto the arm)
+ros2 topic pub --once /start_recover std_msgs/Bool "{data: true}"
 ```
 
 ---
 
 ## Topic Interface
 
-| Topic | Type | Direction | Description |
-|-------|------|-----------|-------------|
-| `/target_floor` | `Int32` | IN | Target floor (negative = basement) |
-| `/elevator_ready` | `Bool` | IN | Scout Mini boarded → start floor button phase |
-| `/start_pickup` | `Bool` | IN | Trigger pickup sequence |
-| `/aligned_ready` | `Bool` | IN | Scout Mini aligned at destination |
-| `/robot_status` | `String` | OUT | `MOVING` / `UPDOWN_PRESSED` / `PICKUP_DONE` / `DELIVERY_DONE` / `FAILED` |
-| `/pickup_done` | `Bool` | OUT | Pickup complete |
-| `/room_number` | `String` | OUT | Recognized room number (e.g. `"529"`) |
-| `/delivery_done` | `Bool` | OUT | Delivery complete |
-| `/contact_detected` | `Bool` | OUT | Collision detected |
+| Topic | Type | Direction | Node | Description |
+|-------|------|-----------|------|-------------|
+| `/target_floor` | `Int32` | IN | elevator | Target floor (negative = basement) |
+| `/target_point` | `PointStamped` | IN | elevator | Manual world coordinate override |
+| `/elevator_ready` | `Bool` | IN | elevator | Scout Mini boarded → start floor button phase |
+| `/start_pickup` | `Bool` | IN | delivery | Trigger pickup sequence |
+| `/aligned_ready` | `Bool` | IN | delivery | Scout Mini aligned at destination |
+| `/start_delivery` | `Bool` | IN | delivery | Trigger delivery sequence directly |
+| `/start_recover` | `Bool` | IN | recover | Trigger FreshBag recovery |
+| `/robot_status` | `String` | OUT | all | Status string (see below) |
+| `/pickup_done` | `Bool` | OUT | delivery | Pickup complete |
+| `/delivery_done` | `Bool` | OUT | delivery | Delivery complete |
+| `/recover_done` | `Bool` | OUT | recover | Recovery complete |
+| `/room_number` | `String` | OUT | delivery / detect_room_sign | Recognized room number (e.g. `"529"`) |
+| `/contact_detected` | `Bool` | OUT | contact_detector | Collision detected |
+| `/contact_status` | `String` | OUT | contact_detector | `CONTACT_DETECTED` / `CONTACT_RESOLVED` |
+
+**`/robot_status` values by node:**
+- **elevator** — `MOVING` / `UPDOWN_PRESSED` / `ELEVATOR_ARRIVED` / `NUMBER_PRESSED` / `NEED_REPOSITION` / `FAILED`
+- **delivery** — `MOVING` / `PICKUP` / `PICKUP_DONE` / `ROOM_SIGN` / `WAITING_ALIGN` / `DELIVER` / `DELIVERY_DONE` / `FAILED`
+- **recover** — `MOVING` / `RECOVER` / `RECOVER_DONE` / `FAILED`
 
 ---
 
@@ -128,10 +153,15 @@ ros2 topic pub --once /aligned_ready std_msgs/Bool "{data: true}"
 
 ### Elevator Node
 ```
-IDLE → UPDOWN_READY → UPDOWN_PRESS → WAIT → NUMBER_READY → NUMBER_PRESS → DONE
+IDLE → UPDOWN_READY → UPDOWN_PRESS → WAIT → NUMBER_READY → NUMBER_PRESS → NUMBER_WAIT → DONE
 ```
 
 ### Delivery Node
 ```
 IDLE → PICKUP → ROOM_SIGN → WAITING_ALIGN → DELIVER → DONE
+```
+
+### Recovery Node
+```
+IDLE → RECOVER → DONE
 ```
