@@ -1,0 +1,6 @@
+# Python dependencies for the courier_arm nodes (pip-installed, not ROS packages)
+ultralytics      # YOLOv8 button / room-sign / box detection
+easyocr          # floor & room number OCR (CPU mode)
+numpy<2.0.0      # cv_bridge is built against NumPy 1.x
+# OpenCV is provided by cv_bridge / system ROS — do NOT `pip install opencv-python`
+# (the pip wheel's Qt backend conflicts with the ROS one)

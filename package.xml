@@ -4,7 +4,7 @@
   <version>0.1.0</version>
   <description>Elevator button pressing and delivery arm nodes for capstone project</description>
   <maintainer email="dmlgud0777@gmail.com">sejong</maintainer>
-  <license>Apache-2.0</license>
+  <license>MIT</license>
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
@@ -15,6 +15,9 @@
   <depend>tf2_ros</depend>
   <depend>tf2_geometry_msgs</depend>
   <depend>cv_bridge</depend>
+
+  <exec_depend>realsense2_camera</exec_depend>
+  <exec_depend>open_manipulator_x_bringup</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>
